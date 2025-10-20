@@ -12,16 +12,24 @@ from sklearn.cluster import KMeans
 from sklearn.neighbors import KernelDensity
 from scipy.stats import gaussian_kde
 import os
-from functools import lru_cache  # 引入缓存装饰器
+from functools import lru_cache
 
 # ============================== 全局设置 & 路径 ==============================
 current_script_dir = os.path.dirname(os.path.abspath(__file__))
+# 获取项目根目录（假设shp文件在项目根目录下）
 project_root = os.path.dirname(current_script_dir)
+
+# 使用绝对路径
 SHP_PATH = os.path.join(project_root, "乡镇街道边界", "广佛街道级.shp")
 CSV_PATH = os.path.join(project_root, "scored4.xlsx")
 
+# 全局缓存字典：用于存储已计算的归一化数值
+GLOBAL_NORMALIZED_CACHE = {}
+# 全局缓存字典：用于存储已计算的 RGB 颜色（维度组合 -> 颜色列表）
+GLOBAL_COLOR_CACHE = {}
 
-# ============================== 工具函数（修改以支持缓存） ==============================
+
+# ============================== 工具函数 ==============================
 def safe_read_csv(path):
     return pd.read_excel(path)
 
@@ -49,16 +57,11 @@ def pick_best_key(cols):
     return None
 
 
-# 全局缓存字典：用于存储已计算的归一化数值
-GLOBAL_NORMALIZED_CACHE = {}
-# 全局缓存字典：用于存储已计算的 RGB 颜色（维度组合 -> 颜色列表）
-GLOBAL_COLOR_CACHE = {}
-
-
 def get_normalized_values_for_dims(dims_list):
-    """计算并缓存指定维度的归一化数值。"""
+    """【性能优化】计算并缓存指定维度的归一化数值。"""
     dims = tuple(dims_list)
     if dims not in GLOBAL_NORMALIZED_CACHE:
+        # 确保使用全局 gdf 进行计算
         arr = np.zeros((len(gdf), len(dims)), dtype=float)
         for i, d in enumerate(dims):
             col = pd.to_numeric(gdf[d], errors="coerce").astype(float)
@@ -83,7 +86,8 @@ def som_rgb(x, y, z):
 
 
 def rgb_from_xyz_cube(x, y, z, brighten=0.35, gamma=1.8):
-    # 此函数保持原样，仅做结构化
+    """用于六边形密度图的颜色计算 (保持原始逻辑)"""
+
     def smoothstep(t):
         t = np.clip(t, 0, 1)
         return t * t * (3 - 2 * t)
@@ -95,7 +99,6 @@ def rgb_from_xyz_cube(x, y, z, brighten=0.35, gamma=1.8):
     def mix_with_white(color, brighten):
         return (1 - brighten) * np.array(color) + brighten * np.array([255, 255, 255])
 
-    # ... (C000 到 C111 的定义保持不变) ...
     C000 = mix_with_white([30, 30, 30], brighten)
     C100 = mix_with_white([220, 50, 50], brighten)
     C010 = mix_with_white([50, 220, 50], brighten)
@@ -126,13 +129,8 @@ def rgb_from_xyz_cube(x, y, z, brighten=0.35, gamma=1.8):
     return f"rgb({int(r)},{int(g)},{int(b)})"
 
 
-# 缓存颜色计算
 def get_colors_for_dims(dims_list, color_func):
-    """
-    计算并缓存指定维度组合的颜色。
-    dims_list: 维度列表 (str)
-    color_func: 使用的颜色函数 (som_rgb 或 rgb_from_xyz_cube)
-    """
+    """【性能优化】计算并缓存指定维度组合的颜色。"""
     dims = tuple(dims_list)
     cache_key = (dims, color_func.__name__)
 
@@ -144,9 +142,7 @@ def get_colors_for_dims(dims_list, color_func):
     return GLOBAL_COLOR_CACHE[cache_key]
 
 
-# ============================== 读取数据 & 全局预处理（保持不变） ==============================
-# ... (数据加载和 GeoPandas 预处理代码保持不变) ...
-
+# ============================== 读取数据 & 全局预处理（大幅优化） ==============================
 gdf = safe_read_shp(SHP_PATH)
 df = safe_read_csv(CSV_PATH)
 normalize_columns_inplace(gdf)
@@ -198,7 +194,7 @@ gdf["_hover"] = [
     for _, row in gdf.iterrows()
 ]
 
-# 预计算 RGB 地图的多边形坐标
+# 预计算 RGB/单维度地图的多边形坐标 (用于 Scattermapbox 加速)
 GLOBAL_POLY_COORDS = []
 POLY_TO_GDF_IDX = []
 for i, row in gdf.iterrows():
@@ -219,26 +215,18 @@ for i, row in gdf.iterrows():
         POLY_TO_GDF_IDX.append(i)
 
 
-# ============================== 缓存重计算函数（优化 KDE/KMeans） ==============================
-
+# ============================== 缓存重计算函数（KDE） ==============================
 @lru_cache(maxsize=32)
 def calculate_kde_grid_and_data(xdim, ydim, bandwidth=0.08):
-    """
-    【性能优化点】: 降低网格分辨率从 200x200 到 100x100，计算速度快 4 倍。
-    缓存 KDE 网格计算和归一化数据，用于聚类和成对散点图。
-    """
-    # 获取归一化数据
+    """【性能优化】使用降低分辨率的网格计算 KDE，加速计算"""
     X_full = get_normalized_values_for_dims([xdim, ydim])
-
-    # 移除 NaN 值的行
     data_indices = gdf[[xdim, ydim]].dropna().index
     X = X_full[gdf.index.isin(data_indices)]
 
-    # KDE (核密度) 估计
     kde = KernelDensity(bandwidth=bandwidth, kernel='gaussian')
     kde.fit(X)
 
-    # 【优化点】网格分辨率降低
+    # 降低网格分辨率 (100x100)
     RESOLUTION = 100
     xi = np.linspace(0, 1, RESOLUTION)
     yi = np.linspace(0, 1, RESOLUTION)
@@ -247,30 +235,20 @@ def calculate_kde_grid_and_data(xdim, ydim, bandwidth=0.08):
     log_dens = kde.score_samples(grid)
     zz = np.exp(log_dens).reshape(xx.shape)
 
-    # 返回网格、归一化数据和原始 gdf 索引
     return xi, yi, zz, X, data_indices
 
 
-@lru_cache(maxsize=16)
-def calculate_kmeans_clusters(xdim, ydim, zdim, k):
-    """缓存 KMeans 聚类结果，用于六边形图"""
-    arr_for_cluster = get_normalized_values_for_dims([xdim, ydim, zdim])
-    kmeans = KMeans(n_clusters=k, random_state=42, n_init='auto')
-    labels = kmeans.fit_predict(arr_for_cluster)
-    return labels
-
-
-# ============================== Dash布局（保持不变） ==============================
+# ============================== Dash布局 ==============================
 app = Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP], title="广州城市韧性可视化")
 server = app.server
 
 map_dropdown_options = [{"label": chinese_labels.get(d, d), "value": d} for d in dimensions]
 axis_dropdown_options = [{"label": chinese_labels.get(d, d), "value": d} for d in dimensions]
-
 knn_axis_options = axis_dropdown_options.copy()
 density_axis_options = axis_dropdown_options.copy()
 cluster_count_options = [{"label": str(k), "value": k} for k in [3, 4, 5, 6, 8, 10, 12, 16, 20]]
 bin_options = [{"label": str(b), "value": b} for b in [10, 20, 30, 40, 60, 80]]
+dist_axis_options = axis_dropdown_options.copy()
 
 app.layout = dbc.Container([
     dbc.NavbarSimple(brand="广州城市韧性可视化平台", color="primary", dark=True, fluid=True),
@@ -368,8 +346,6 @@ app.layout = dbc.Container([
     ], className="mt-3")
 ], fluid=True)
 
-dist_axis_options = axis_dropdown_options.copy()
-
 app.layout.children.append(
     dbc.Row([  # 第三行（分布曲线 + 成对散点热力）
         dbc.Col([
@@ -411,25 +387,42 @@ app.layout.children.append(
 # ============================== Callbacks（优化后的） ==============================
 @app.callback(Output("map-single", "figure"), Input("map-single-dim", "value"))
 def update_single_map(map_dim):
-    # 此函数已优化，无需改动
-    red_green_scale = [
-        [0.0, "#d73027"],
-        [0.25, "#fc8d59"],
-        [0.5, "#fee08b"],
-        [0.75, "#d9ef8b"],
-        [1.0, "#1a9850"]
-    ]
+    """【加速】: 替换 px.choropleth_map 为 go.Scattermapbox + 预计算几何体。"""
 
-    fig = px.choropleth_map(
-        gdf, geojson=geojson, locations="district", color=map_dim,
-        featureidkey="properties.district",
-        map_style="open-street-map",
-        center={"lat": center_lat, "lon": center_lon}, zoom=zoom_val,
-        color_continuous_scale=red_green_scale,
-        hover_data={"_hover": True, "district": False, map_dim: False}
-    )
-    fig.update_traces(hovertemplate="%{customdata[0]}<extra></extra>")
-    fig.update_layout(margin={"r": 0, "t": 30, "l": 0, "b": 0}, height=320, coloraxis_showscale=False)
+    # 1. 获取选定维度的归一化数值 (0到1)
+    arr_norm = get_normalized_values_for_dims([map_dim])[:, 0]
+
+    # 2. 定义颜色映射（红->绿）
+    def get_red_green_color(val):
+        h = val * (120 / 360)
+        s = 0.85  # 饱和度
+        v = 0.95  # 亮度
+        r, g, b = colorsys.hsv_to_rgb(h, s, v)
+        return f"rgb({int(r * 255)},{int(g * 255)},{int(b * 255)})"
+
+    # 3. 计算每行的颜色
+    colors_by_row = [get_red_green_color(v) for v in arr_norm]
+
+    # 4. 绘图：使用 Scattermapbox
+    fig = go.Figure()
+
+    for i in range(len(GLOBAL_POLY_COORDS)):
+        trace_data = GLOBAL_POLY_COORDS[i]
+        gdf_row_index = POLY_TO_GDF_IDX[i]
+
+        fig.add_trace(go.Scattermapbox(
+            lon=trace_data["lon"], lat=trace_data["lat"], mode='lines', fill='toself',
+            fillcolor=colors_by_row[gdf_row_index],
+            line=dict(width=0.4, color="#222222"),
+            hoverinfo='text', text=trace_data["text"]
+        ))
+
+    fig.update_layout(mapbox_style="open-street-map",
+                      mapbox_center={"lat": center_lat, "lon": center_lon},
+                      mapbox_zoom=zoom_val,
+                      margin={"r": 0, "t": 30, "l": 0, "b": 0}, height=320,
+                      showlegend=False)
+
     return fig
 
 
@@ -438,7 +431,7 @@ def update_single_map(map_dim):
 def update_scatter(xdim, ydim, zdim):
     POINT_SIZE = 2
 
-    # 【性能优化点】：使用缓存的颜色
+    # 【性能优化】：使用缓存的颜色
     colors = get_colors_for_dims([xdim, ydim, zdim], som_rgb)
 
     fig = go.Figure(data=[go.Scatter3d(
@@ -459,7 +452,7 @@ def update_scatter(xdim, ydim, zdim):
 
 @app.callback(Output("map-rgb", "figure"), [Input("x-dim", "value"), Input("y-dim", "value"), Input("z-dim", "value")])
 def update_rgb_map(xdim, ydim, zdim):
-    # 【性能优化点】：使用缓存的颜色
+    # 【性能优化】：使用缓存的颜色，并使用预计算几何体
     colors_by_row = get_colors_for_dims([xdim, ydim, zdim], som_rgb)
 
     fig = go.Figure()
@@ -486,27 +479,33 @@ def update_rgb_map(xdim, ydim, zdim):
 @app.callback(Output("hex-density", "figure"),
               [Input("x-dim", "value"), Input("y-dim", "value"), Input("z-dim", "value")])
 def update_hex_density(xdim, ydim, zdim):
-    """
-    【性能优化点】：降低聚类数，从 8x8 (64) 降至 6x6 (36)。
-    """
+    """【修复/优化】：使用 KMeans 簇中心点颜色，并保持 8x8 簇数。"""
 
-    # 【优化点】：降低 KMeans 簇数
-    nx, ny = 6, 6
+    # 保持 8x8 (64 簇)
+    nx, ny = 8, 8
     n_hex = nx * ny
 
-    # 使用缓存的聚类标签 (只在维度变化时重算)
-    labels = calculate_kmeans_clusters(xdim, ydim, zdim, n_hex)
+    arr_for_cluster = get_normalized_values_for_dims([xdim, ydim, zdim])
 
-    # 【性能优化点】：使用缓存的颜色
-    colors = get_colors_for_dims([xdim, ydim, zdim], rgb_from_xyz_cube)
+    # 重新运行 KMeans 以获取簇中心 (Centers)
+    kmeans = KMeans(n_clusters=n_hex, random_state=42, n_init='auto').fit(arr_for_cluster)
+    labels = kmeans.labels_
+    centers = kmeans.cluster_centers_
 
-    temp_df = pd.DataFrame({'_cluster': labels, '_hex': colors})
+    # 使用簇中心点的归一化坐标计算代表色
+    cluster_centers_colors = [
+        rgb_from_xyz_cube(c[0], c[1], c[2]) for c in centers
+    ]
 
-    # 统计每簇个数与平均 RGB (使用第一个颜色作为代表)
+    temp_df = pd.DataFrame({'_cluster': labels})
+
+    # 统计每簇个数
     cluster_stats = temp_df.groupby("_cluster").agg(
         count=('_cluster', "size"),
-        rgb_first=("_hex", lambda s: s.iloc[0])
     ).reset_index()
+
+    # 将计算好的中心点颜色添加到统计中
+    cluster_stats['rgb_center'] = [cluster_centers_colors[int(idx)] for idx in cluster_stats['_cluster']]
 
     # 布局六边形中心（保持不变）
     hex_centers = []
@@ -522,10 +521,10 @@ def update_hex_density(xdim, ydim, zdim):
     cluster_stats["cx"] = [c[0] for c in hex_centers][:len(cluster_stats)]
     cluster_stats["cy"] = [c[1] for c in hex_centers][:len(cluster_stats)]
 
-    # 绘制：只显示每簇街道数量（数字）与六边形色块
+    # 绘制：使用簇中心点的颜色
     fig = go.Figure()
     for _, row in cluster_stats.iterrows():
-        color = row["rgb_first"] if pd.notna(row["rgb_first"]) else "rgb(200,200,200)"
+        color = row["rgb_center"]
 
         fig.add_trace(go.Scatter(
             x=[row["cx"]], y=[row["cy"]],
@@ -547,23 +546,17 @@ def update_hex_density(xdim, ydim, zdim):
     return fig
 
 
-# ============================== 新增：KNN/KDE 聚类图（左下下） ==============================
+# ... (KDE/密度图等的回调函数保持不变，它们受益于 calculate_kde_grid_and_data 的降采样优化) ...
+
 @app.callback(
     Output("knn-kde-fig", "figure"),
     [Input("knn-x", "value"), Input("knn-y", "value"), Input("knn-k", "value")]
 )
 def update_knn_kde(xdim, ydim, k_clusters):
-    """
-    使用降低分辨率的 KDE 网格。
-    """
-
-    # 【性能优化点】：使用降低分辨率的缓存 KDE 网格
     xi, yi, zz, X_norm, data_indices = calculate_kde_grid_and_data(xdim, ydim)
-
     data_points = gdf.loc[data_indices].copy()
     k = int(k_clusters) if k_clusters is not None else 8
 
-    # KMeans 聚类 (K 变化时重算)
     kmeans = KMeans(n_clusters=k, random_state=42, n_init='auto').fit(X_norm)
     labels = kmeans.labels_
     centers = kmeans.cluster_centers_
@@ -572,10 +565,7 @@ def update_knn_kde(xdim, ydim, k_clusters):
     data_points["_x"] = X_norm[:, 0]
     data_points["_y"] = X_norm[:, 1]
 
-    # 画图：先等高线（作为背景），再绘制簇点
     fig = go.Figure()
-
-    # Contour 等高线（核密度）
     fig.add_trace(go.Contour(
         x=xi, y=yi, z=zz,
         showscale=False,
@@ -583,7 +573,6 @@ def update_knn_kde(xdim, ydim, k_clusters):
         opacity=0.6, hoverinfo='skip', colorscale='Blues'
     ))
 
-    # 每个样本点（按簇着色）
     palette = px.colors.qualitative.Safe
     for c in np.unique(labels):
         sub = data_points[data_points["cluster"] == c]
@@ -597,7 +586,6 @@ def update_knn_kde(xdim, ydim, k_clusters):
             text=sub["district"]
         ))
 
-    # 绘制簇心
     fig.add_trace(go.Scatter(
         x=centers[:, 0], y=centers[:, 1],
         mode='markers+text',
@@ -618,21 +606,17 @@ def update_knn_kde(xdim, ydim, k_clusters):
     return fig
 
 
-# ============================== 新增：密度分布图（右下下） ==============================
 @app.callback(
     Output("density-fig", "figure"),
     [Input("den-x", "value"), Input("den-y", "value"), Input("den-bins", "value")]
 )
 def update_density_plot(xdim, ydim, n_bins):
-    # 使用缓存的归一化数值
     X_norm = get_normalized_values_for_dims([xdim, ydim])
     data_indices = gdf[[xdim, ydim]].dropna().index
-
     data = gdf.loc[data_indices].copy()
     data["_x"] = X_norm[gdf.index.isin(data_indices), 0]
     data["_y"] = X_norm[gdf.index.isin(data_indices), 1]
 
-    # 使用 Plotly 的 density_heatmap
     fig = px.density_heatmap(
         data_frame=data, x="_x", y="_y",
         nbinsx=int(n_bins), nbinsy=int(n_bins),
@@ -653,16 +637,12 @@ def update_density_plot(xdim, ydim, n_bins):
     return fig
 
 
-# 单维度分布曲线
 @app.callback(Output("dist-fig", "figure"), Input("dist-dim", "value"))
 def update_distribution(dim):
-    # 此函数对 CPU 压力小，保持不变
     data = gdf[dim].dropna()
     fig = go.Figure()
-    # 直方图
     fig.add_trace(go.Histogram(x=data, nbinsx=30, histnorm='probability density',
                                marker=dict(color='lightblue'), opacity=0.6, name="直方图"))
-    # KDE 曲线
     kde = gaussian_kde(data)
     xi = np.linspace(data.min(), data.max(), 200)
     fig.add_trace(go.Scatter(x=xi, y=kde(xi), mode='lines',
@@ -676,23 +656,16 @@ def update_distribution(dim):
     return fig
 
 
-# 成对散点 + KDE 热力
 @app.callback(Output("pair-kde-fig", "figure"), [Input("pair-x", "value"), Input("pair-y", "value")])
 def update_pair_kde(xdim, ydim):
-    """
-    使用降低分辨率的 KDE 网格。
-    """
-    # 【性能优化点】：使用降低分辨率的缓存 KDE 网格
     xi, yi, zz, X_norm, _ = calculate_kde_grid_and_data(xdim, ydim)
 
     fig = go.Figure()
-    # 背景 KDE 等高线
     fig.add_trace(go.Contour(
         x=xi, y=yi, z=zz,
         colorscale="Viridis", opacity=0.6, showscale=False,
         contours=dict(showlines=False)
     ))
-    # 散点
     fig.add_trace(go.Scatter(
         x=X_norm[:, 0], y=X_norm[:, 1],
         mode="markers", marker=dict(size=5, color="black", opacity=0.6),
@@ -708,8 +681,10 @@ def update_pair_kde(xdim, ydim):
 
 if __name__ == '__main__':
     # 强制在启动时计算默认维度的归一化值，减少首屏加载延迟
-    get_normalized_values_for_dims(dimensions[:3])
-    get_normalized_values_for_dims(dimensions[:2])
+    if len(dimensions) >= 3:
+        get_normalized_values_for_dims(dimensions[:3])
+    if len(dimensions) >= 2:
+        get_normalized_values_for_dims(dimensions[:2])
 
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port, debug=False)
