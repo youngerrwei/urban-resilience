@@ -5,3 +5,4 @@ plotly
 dash
 dash_bootstrap_components
 scikit-learn
+openpyxl
