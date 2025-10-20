@@ -16,7 +16,6 @@ import os
 current_script_dir = os.path.dirname(os.path.abspath(__file__))
 # 获取项目根目录（假设shp文件在项目根目录下）
 project_root = os.path.dirname(current_script_dir)
-print(project_root)
 
 # 使用绝对路径
 SHP_PATH = os.path.join(project_root, "乡镇街道边界", "广佛街道级.shp")
@@ -601,4 +600,5 @@ def update_pair_kde(xdim, ydim):
     return fig
 
 if __name__ == '__main__':
-    app.run(debug=True, port=10000)
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port, debug=False)
