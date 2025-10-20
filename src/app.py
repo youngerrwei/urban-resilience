@@ -11,9 +11,16 @@ import dash_bootstrap_components as dbc
 from sklearn.cluster import KMeans
 from sklearn.neighbors import KernelDensity
 
-# ============================== 配置路径 ==============================
-SHP_PATH = "乡镇街道边界\\广佛街道级.shp"
-CSV_PATH = "scored4.xlsx"
+import os
+
+current_script_dir = os.path.dirname(os.path.abspath(__file__))
+# 获取项目根目录（假设shp文件在项目根目录下）
+project_root = os.path.dirname(current_script_dir)
+print(project_root)
+
+# 使用绝对路径
+SHP_PATH = os.path.join(project_root, "乡镇街道边界", "广佛街道级.shp")
+CSV_PATH = os.path.join(project_root, "scored4.xlsx")
 
 # ============================== 工具函数 ==============================
 def safe_read_csv(path):
