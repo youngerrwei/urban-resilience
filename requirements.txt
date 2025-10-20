@@ -1,0 +1,7 @@
+geopandas
+pandas
+numpy
+plotly
+dash
+dash_bootstrap_components
+scikit-learn
